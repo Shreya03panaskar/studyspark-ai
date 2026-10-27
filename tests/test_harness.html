@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>StudySpark Automated Test Harness</title>
+</head>
+<body>
+  <div id="app"></div>
+  <pre id="test-results"></pre>
+
+  <script type="module">
+    import { StorageService } from '../src/services/storage.js';
+    import { QUESTION_BANK, SUBJECTS, getSubjectById, getQuestionsBySubject } from '../src/data/questions.js';
+    import { createQuizSession, createRevisionQuizSession } from '../src/services/quizEngine.js';
+
+    const results = [];
+
+    function assert(name, condition, details = '') {
+      results.push({
+        test: name,
+        passed: Boolean(condition),
+        details: details || (condition ? 'Passed' : 'Assertion failed')
+      });
+    }
+
+    try {
+      // 1. Data Integrity Tests
+      assert('Subject Count', SUBJECTS.length === 3, `Expected 3 subjects, got ${SUBJECTS.length}`);
+      assert('Total Questions', QUESTION_BANK.length >= 18, `Expected at least 18 questions, got ${QUESTION_BANK.length}`);
+
+      SUBJECTS.forEach(sub => {
+        const qs = getQuestionsBySubject(sub.id);
+        assert(`Subject Question Count: ${sub.name}`, qs.length >= 5, `Has ${qs.length} questions`);
+        
+        qs.forEach((q, i) => {
+          assert(`Question ${q.id} Options`, q.options && q.options.length === 4, `Has 4 options`);
+          assert(`Question ${q.id} Correct Index`, q.correctIndex >= 0 && q.correctIndex <= 3, `Correct index is valid`);
+          assert(`Question ${q.id} Explanation`, typeof q.explanation === 'string' && q.explanation.length > 20, `Has clear explanation`);
+        });
+      });
+
+      // 2. Storage Service Initial State & Reset
+      StorageService.resetAll();
+      const emptyAttempts = StorageService.getAttempts();
+      const emptyGaps = StorageService.getRevisionBank();
+      const emptyStats = StorageService.getComputedStats();
+      
+      assert('Storage Reset: Attempts Empty', emptyAttempts.length === 0, `Attempts: ${emptyAttempts.length}`);
+      assert('Storage Reset: Gaps Empty', emptyGaps.length === 0, `Gaps: ${emptyGaps.length}`);
+      assert('Storage Reset: Computed Stats Empty', emptyStats.totalAttempts === 0 && emptyStats.averageScore === 0, `Stats: ${JSON.stringify(emptyStats)}`);
+
+      // 3. Quiz Session & Navigation
+      const javaSub = getSubjectById('java');
+      const session = createQuizSession(javaSub);
+      assert('Quiz Session Created', session && session.questions.length >= 6, `Questions: ${session.questions.length}`);
+      assert('Initial Index 0', session.currentIndex === 0, `Current index: ${session.currentIndex}`);
+      
+      session.nextQuestion();
+      assert('Next Question Navigation', session.currentIndex === 1, `Current index: ${session.currentIndex}`);
+      session.prevQuestion();
+      assert('Prev Question Navigation', session.currentIndex === 0, `Current index: ${session.currentIndex}`);
+
+      // 4. Missing Answers Validation
+      const unanswered = session.getUnansweredQuestions();
+      assert('Unanswered Validation Detects Missing', unanswered.length === session.questions.length, `Detected ${unanswered.length} unanswered`);
+
+      // 5. Answer Selection & Modification
+      const q0 = session.questions[0];
+      session.selectAnswer(q0.id, 0);
+      assert('Answer Selection', session.getSelectedAnswer(q0.id) === 0, `Selected: ${session.getSelectedAnswer(q0.id)}`);
+      
+      // Modify answer
+      session.selectAnswer(q0.id, q0.correctIndex);
+      assert('Answer Modification', session.getSelectedAnswer(q0.id) === q0.correctIndex, `Updated: ${session.getSelectedAnswer(q0.id)}`);
+
+      // 6. Complete and Submit Quiz
+      // Answer remaining questions correctly
+      for (let i = 1; i < session.questions.length; i++) {
+        session.selectAnswer(session.questions[i].id, session.questions[i].correctIndex);
+      }
+
+      const submitResult = session.submit();
+      assert('Quiz Submission Result', submitResult.score === session.questions.length, `Score: ${submitResult.score}/${submitResult.totalQuestions}`);
+      assert('100% Score Calculation', submitResult.percentage === 100, `Percentage: ${submitResult.percentage}%`);
+      assert('Mastery Tier Calculation', submitResult.tier.includes('Mastery'), `Tier: ${submitResult.tier}`);
+
+      // 7. Verify Persistence of Attempt
+      const savedAttempts = StorageService.getAttempts();
+      assert('Attempt Persisted to LocalStorage', savedAttempts.length === 1, `Saved attempts: ${savedAttempts.length}`);
+      assert('Streak Incremented', StorageService.getStreak().currentStreak >= 1, `Streak: ${StorageService.getStreak().currentStreak}`);
+
+      // 8. Quiz with deliberate mistakes & Knowledge Gaps Bank
+      const netSub = getSubjectById('networks');
+      const netSession = createQuizSession(netSub);
+      const wrongIndex = (netSession.questions[0].correctIndex + 1) % 4;
+      netSession.selectAnswer(netSession.questions[0].id, wrongIndex); // intentionally wrong
+      
+      for (let i = 1; i < netSession.questions.length; i++) {
+        netSession.selectAnswer(netSession.questions[i].id, netSession.questions[i].correctIndex);
+      }
+      
+      const netResult = netSession.submit();
+      assert('Net Result has 1 Incorrect', netResult.incorrectQuestions.length === 1, `Incorrect count: ${netResult.incorrectQuestions.length}`);
+      
+      const bank = StorageService.getRevisionBank();
+      assert('Revision Bank Recorded Mistake', bank.length === 1 && bank[0].questionId === netSession.questions[0].id, `Bank items: ${bank.length}`);
+
+      // 9. Revision Drill Session
+      const drillSession = createRevisionQuizSession(bank);
+      assert('Drill Session Created with Mistake', drillSession.questions.length === 1, `Drill questions: ${drillSession.questions.length}`);
+
+      // 10. Removal from Revision Bank
+      StorageService.removeRevisionItem(netSession.questions[0].id);
+      assert('Knowledge Gap Resolved/Removed', StorageService.getRevisionBank().length === 0, `Remaining: ${StorageService.getRevisionBank().length}`);
+
+      // 11. Theme & Preferences
+      StorageService.savePreferences({ theme: 'dark', dailyGoal: 3 });
+      const savedPrefs = StorageService.getPreferences();
+      assert('Theme Saved to Dark', savedPrefs.theme === 'dark', `Theme: ${savedPrefs.theme}`);
+      assert('Daily Goal Saved to 3', savedPrefs.dailyGoal === 3, `Goal: ${savedPrefs.dailyGoal}`);
+
+      // Reset to light
+      StorageService.savePreferences({ theme: 'light', dailyGoal: 2 });
+
+    } catch (err) {
+      results.push({
+        test: 'FATAL_EXCEPTION',
+        passed: false,
+        details: err.stack || err.toString()
+      });
+    }
+
+    document.getElementById('test-results').textContent = JSON.stringify(results, null, 2);
+  </script>
+</body>
+</html>
+
